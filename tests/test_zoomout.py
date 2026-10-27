@@ -1,3 +1,5 @@
+import ast
+import concurrent.futures
 import inspect
 import json
 import os
@@ -47,7 +49,7 @@ def feed(events, cfg=None):
 def test_schemas_are_small_valid_and_match_the_functions():
     assert set(OPS) == {"install", "init", "prompt", "run", "hook"}
     for name, schema in zoomout.SCHEMAS.items():
-        assert len(json.dumps(schema, separators=(",", ":"))) <= 600, name
+        assert len(json.dumps(schema)) <= 600, name
         jsonschema.Draft202012Validator.check_schema(schema)
         assert set(schema["properties"]) == set(inspect.signature(OPS[name]).parameters), name
     # user errors come back as reports, never as exceptions
@@ -78,7 +80,9 @@ def test_install_into_a_project_then_init_prints_a_working_hook(tmp_path):
     hooks = json.loads(printed.stdout)["hooks"]
     assert set(hooks) == {"PostToolUse", "PostToolUseFailure"}
     assert hooks["PostToolUse"][0]["matcher"] == "*"
-    assert "$CLAUDE_PROJECT_DIR/.claude/skills/zoomout/zoomout.py" in hooks["PostToolUse"][0]["hooks"][0]["command"]
+    handler = hooks["PostToolUse"][0]["hooks"][0]  # exec form: no shell, so no quoting on any platform
+    assert handler["command"] in ("python3", "py")
+    assert handler["args"][-2:] == ["${CLAUDE_PROJECT_DIR}/.claude/skills/zoomout/zoomout.py", "hook"]
     assert not (claude / "settings.json").exists()
     assert cli("init").returncode != 0  # --print is required: init only ever prints
     # the installed copy works as the hook
@@ -90,9 +94,12 @@ def test_user_install_goes_to_claude_config_dir(tmp_path):
     env = dict(os.environ, CLAUDE_CONFIG_DIR=str(tmp_path / "cfg"))
     assert cli("install", env=env).returncode == 0
     assert (tmp_path / "cfg" / "commands" / "zoomout.md").is_file()
-    snippet = json.loads(cli("init", "--print", env=env).stdout)
-    command = snippet["hooks"]["PostToolUseFailure"][0]["hooks"][0]["command"]
-    assert (tmp_path / "cfg" / "skills" / "zoomout" / "zoomout.py").as_posix() in command
+    handler = json.loads(cli("init", "--print", env=env).stdout)["hooks"]["PostToolUseFailure"][0]["hooks"][0]
+    script = tmp_path / "cfg" / "skills" / "zoomout" / "zoomout.py"
+    assert handler == {"type": "command", "command": sys.executable, "args": [str(script), "hook"]}
+    ran = subprocess.run([handler["command"], *handler["args"]], input="{}", capture_output=True, text=True,
+                         timeout=30, check=False, env=dict(os.environ, ZOOMOUT_STATE_DIR=str(tmp_path / "state")))
+    assert (ran.returncode, ran.stdout, ran.stderr) == (0, "", "")
 
 
 def test_shipped_command_and_skill_are_what_install_writes():
@@ -109,6 +116,17 @@ def test_prompt_carries_the_context_and_the_procedure():
     for needle in ("GOAL: ship the importer", "- regex parser: breaks on nested quotes", "no new dependencies",
                    "parsing", "KEY FACT:", "never a real or named person", "VERDICT:", "FIRST STEP:"):
         assert needle in text
+    assert "- one attempt\n" in zoomout.prompt("g", tried="one attempt")["details"]["prompt"]  # not letter by letter
+
+
+def test_no_network_no_telemetry_and_one_subprocess():
+    tree = ast.parse((ROOT / "zoomout.py").read_text(encoding="utf-8"))
+    imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+                for a in (n.names if isinstance(n, ast.Import) else [ast.alias(n.module or "")])}
+    assert not imported & {"socket", "urllib", "http", "ssl", "requests", "ftplib", "smtplib", "asyncio"}
+    users = {f.name for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
+             for n in ast.walk(f) if isinstance(n, ast.Name) and n.id == "subprocess"}
+    assert users == {"_claude_fresh"}
 
 
 FAKE_CLAUDE = r'''import json, os, sys
@@ -133,8 +151,10 @@ def fake_claude(tmp_path):
     return str(exe)
 
 
-def test_run_uses_an_empty_temp_dir_and_config_dir_then_parses_the_verdict(tmp_path):
-    rep = zoomout.run("G", ["T"], model="m1", claude_bin=fake_claude(tmp_path))
+def test_run_uses_an_empty_temp_dir_and_config_dir_then_parses_the_verdict(tmp_path, monkeypatch):
+    exe = fake_claude(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    rep = zoomout.run("G", ["T"], model="m1", claude_bin=os.path.join(".", os.path.basename(exe)))  # relative works
     assert rep["ok"], rep
     seen = json.loads(rep["details"]["output"].splitlines()[0])
     assert seen["empty"] and seen["goal"] and seen["argv"] == ["-p", "--model", "m1"]
@@ -192,6 +212,35 @@ def test_fires_once_per_kind():
     assert len(feed([edit("/work/a.py")] * 12)) == 1
     both = feed([edit("/work/a.py")] * 5 + [bash("make deploy")] * 6)
     assert len(both) == 2  # edit_churn once, retry once, nothing repeated
+
+
+def test_config_first_file_found_wins_and_bad_values_are_ignored(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ZOOMOUT_CONFIG", raising=False)
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "zoomout.json").write_text('{"test_fail_limit": 1, "edit_limit": "5", "x": 1}')
+    cfg = zoomout.load_config()
+    assert cfg["test_fail_limit"] == 1 and cfg["edit_limit"] == zoomout.DEFAULTS["edit_limit"] and "x" not in cfg
+    (tmp_path / "env.json").write_text("[1, 2]")  # $ZOOMOUT_CONFIG is found first; a bad file means defaults
+    monkeypatch.setenv("ZOOMOUT_CONFIG", str(tmp_path / "env.json"))
+    assert zoomout.load_config() == zoomout.DEFAULTS
+    (tmp_path / "env.json").write_text('{"test_command_patterns": [1], "commit_patterns": ["("], "retry_limit": 9}')
+    cfg = zoomout.load_config()
+    assert cfg == dict(zoomout.DEFAULTS, retry_limit=9)
+    assert zoomout.hook(dict(edit("/work/a.py"), session_id="cfg"), str(tmp_path / "state"))["ok"]
+
+
+def test_zoomout_off_and_concurrent_hooks(tmp_path, monkeypatch):
+    for value, off in (("1", True), ("0", False), ("", False)):
+        monkeypatch.setenv("ZOOMOUT_OFF", value)
+        rep = zoomout.hook(dict(edit("/work/a.py"), session_id="off"), str(tmp_path))
+        assert rep["ok"] and (rep["changed"] == []) == off, value
+    monkeypatch.delenv("ZOOMOUT_OFF")
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:  # parallel tool calls run hooks at the same time
+        reps = list(pool.map(lambda i: zoomout.hook(dict(edit(f"/work/{i}.py"), session_id="par"), str(tmp_path)),
+                             range(40)))
+    assert all(r["ok"] for r in reps), [r["warnings"] for r in reps if not r["ok"]][:2]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["off.json", "par.json"]  # no stray temp files
 
 
 def test_hook_cli_suggests_once_and_never_blocks(tmp_path):
