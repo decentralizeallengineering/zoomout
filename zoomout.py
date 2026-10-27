@@ -112,22 +112,18 @@ FIRST_STEP_RE = re.compile(r"FIRST STEP\W{0,4}\s*([^\n]+)", re.IGNORECASE)
 
 S = {"type": "string"}
 LIST = {"type": "array", "items": S}
-ASK = {"goal": dict(S, description="outcome needed"),
-       "tried": dict(LIST, description="attempts and outcomes, in order"),
-       "constraints": dict(S, description="hard constraints"),
-       "fields": dict(LIST, description="suggested fields")}
-PROJECT = dict(S, description="project directory; omit for the user-level ~/.claude")
+ASK = {"goal": dict(S, description="outcome needed"), "tried": dict(LIST, description="attempts and outcomes"),
+       "constraints": S, "fields": dict(LIST, description="suggested fields")}
+PROJECT = dict(S, description="project dir; omit for ~/.claude")
 SCHEMAS = {
     "install": {"type": "object", "additionalProperties": False, "properties": {
         "project": PROJECT, "force": {"type": "boolean", "description": "replace differing files"}}},
     "init": {"type": "object", "additionalProperties": False, "properties": {"project": PROJECT}},
     "prompt": {"type": "object", "additionalProperties": False, "required": ["goal"], "properties": ASK},
     "run": {"type": "object", "additionalProperties": False, "required": ["goal"], "properties": dict(
-        ASK, model=dict(S, description="claude --model value"), claude_bin=dict(S, description="claude executable"),
-        timeout={"type": "integer", "minimum": 1}, dry_run={"type": "boolean"})},
+        ASK, model=S, claude_bin=S, timeout={"type": "integer", "minimum": 1}, dry_run={"type": "boolean"})},
     "hook": {"type": "object", "additionalProperties": False, "required": ["event"], "properties": {
-        "event": {"type": "object", "description": "hook input JSON from Claude Code"},
-        "state_dir": dict(S, description="where per-session state is kept")}},
+        "event": {"type": "object", "description": "hook input JSON"}, "state_dir": S}},
 }
 
 
@@ -146,17 +142,31 @@ def _operation(fn):
 
 
 def load_config():
+    """DEFAULTS, overridden by the first config file found; unknown keys and wrongly typed values are ignored."""
     cfg = dict(DEFAULTS)
     for path in (os.environ.get("ZOOMOUT_CONFIG"), os.path.join(".claude", "zoomout.json"),
                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "zoomout.json")):
         if path and os.path.isfile(path):
             try:
                 with open(path, encoding="utf-8") as fh:
-                    cfg.update(json.load(fh))
+                    data = json.load(fh)
             except (OSError, ValueError):
-                continue
+                data = {}
+            if isinstance(data, dict):
+                cfg.update({k: v for k, v in data.items() if k in DEFAULTS and _valid(v, DEFAULTS[k])})
             break
     return cfg
+
+
+def _valid(value, default):
+    if type(value) is not type(default):
+        return False
+    if isinstance(value, list):  # the edit tool names and the regex lists
+        try:
+            return all(isinstance(x, str) and re.compile(x) for x in value)
+        except re.error:
+            return False
+    return True
 
 
 # ------------------------------------------------------------------ install / init
@@ -192,11 +202,13 @@ def init(project=None):
     """Return the hook settings snippet for ~/.claude or <project>/.claude. Never edits settings."""
     root = _claude_dir(project)
     script = root / "skills" / "zoomout" / "zoomout.py"
-    if project:
-        command = 'python3 "$CLAUDE_PROJECT_DIR/.claude/skills/zoomout/zoomout.py" hook'
+    if project:  # portable across machines; py.exe is the launcher that python.org installs on Windows
+        exe, args = ("py", ["-3"]) if os.name == "nt" else ("python3", [])
+        args += ["${CLAUDE_PROJECT_DIR}/.claude/skills/zoomout/zoomout.py", "hook"]
     else:
-        command = f'"{Path(sys.executable).as_posix()}" "{script.as_posix()}" hook'
-    entry = [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}]
+        exe, args = sys.executable, [str(script), "hook"]
+    # exec form: Claude Code spawns `command` with `args` directly, with no shell to quote for
+    entry = [{"matcher": "*", "hooks": [{"type": "command", "command": exe, "args": args}]}]
     warnings = [] if script.is_file() else [f"{script} not found: install first"]
     return _report(warnings=warnings, settings_file=str(root / "settings.json"),
                    snippet={"hooks": {"PostToolUse": entry, "PostToolUseFailure": entry}})
@@ -208,6 +220,7 @@ def prompt(goal, tried=None, constraints=None, fields=None):
     """Build the step-back prompt for a fresh model."""
     if not isinstance(goal, str) or not goal.strip():
         return _report(False, warnings=["goal is required"])
+    tried, fields = ([x] if isinstance(x, str) else x for x in (tried, fields))
     tried_text = "\n".join("- " + str(t) for t in tried) if tried else "- (nothing listed)"
     fields_line = f"FIELDS SUGGESTED BY THE CALLER (confirm or correct): {', '.join(fields)}\n" if fields else ""
     text = FRESH_INTRO.format(goal=goal.strip(), constraints=constraints or "(none stated; infer and flag as inferred)",
@@ -231,6 +244,7 @@ def _claude_fresh(cmd, text, timeout):
     exe = shutil.which(cmd[0])
     if not exe:
         return 127, "", f"{cmd[0]} not found on PATH"
+    exe = os.path.abspath(exe)
     with tempfile.TemporaryDirectory(prefix="zoomout-", ignore_cleanup_errors=True) as tmp:
         work, config = os.path.join(tmp, "work"), os.path.join(tmp, "config")
         os.mkdir(work)
@@ -336,7 +350,7 @@ def process(event, state, cfg):
 @_operation
 def hook(event, state_dir=None):
     """Update this session's trigger state for one hook event and return any /zoomout suggestion."""
-    if os.environ.get("ZOOMOUT_OFF"):
+    if os.environ.get("ZOOMOUT_OFF", "0") not in ("", "0"):
         return _report(suggestions=[], output=None)
     root = Path(state_dir or os.environ.get("ZOOMOUT_STATE_DIR") or Path.home() / ".cache" / "zoomout")
     sid = re.sub(r"[^A-Za-z0-9_-]", "", str(event.get("session_id") or "default")) or "default"
@@ -348,9 +362,14 @@ def hook(event, state_dir=None):
         pass
     notes = process(event, state, load_config())
     root.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state), encoding="utf-8")
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=root, prefix=sid, suffix=".tmp")  # unique: parallel tool calls run hooks at once
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     output = {"hookSpecificOutput": {"hookEventName": event.get("hook_event_name") or "PostToolUse",
                                      "additionalContext": "\n".join(notes)}} if notes else None
     return _report(changed=[path], suggestions=notes, output=output)
@@ -364,8 +383,10 @@ def _cli_install(args):
     if rep["ok"] and not rep["changed"]:
         print("already installed in", rep["details"]["root"])
     if rep["ok"]:
-        print("Type /zoomout in Claude Code. Optional hook: zoomout init --print"
-              + (f" --project {args.project}" if args.project else ""))
+        script = Path(rep["details"]["root"]) / "skills" / "zoomout" / "zoomout.py"
+        q = lambda p: f'"{p}"' if " " in str(p) else str(p)  # noqa: E731
+        print(f"Type /zoomout in Claude Code. Optional hook: {Path(sys.executable).name} {q(script)} init --print"
+              + (f" --project {q(args.project)}" if args.project else ""))
     for w in rep["warnings"]:
         print("zoomout:", w, file=sys.stderr)
     return 0 if rep["ok"] else 1
