@@ -5,8 +5,8 @@ Subcommands:
   zoomout prompt --goal G --tried T [--tried T ...]   print the step-back prompt
   zoomout run    --goal G --tried T ... [--fresh] [--dry-run]
                                                       run it through headless `claude -p`
-  zoomout hook                                        PostToolUse hook: suggest /zoomout
-                                                      when a trigger fires (never blocks)
+  zoomout hook                                        PostToolUse/PostToolUseFailure hook: suggest
+                                                      /zoomout when a trigger fires (never blocks)
 
 Config: JSON, first found of $ZOOMOUT_CONFIG, ./.claude/zoomout.json,
 $XDG_CONFIG_HOME/zoomout/config.json, zoomout.json next to this script.
@@ -37,9 +37,9 @@ DEFAULTS = {
     "edit_tools": ["Edit", "Write", "MultiEdit", "NotebookEdit"],
 }
 
-FAIL_RE = re.compile(
+FAIL_RE = re.compile(  # failing output from a command that still exited 0, e.g. `pytest | tail`
     r"(\b[1-9]\d*\s+(failed|errors?)\b|\bFAILED\b|Traceback \(most recent|\bAssertionError\b|"
-    r"Exit code [1-9]|npm ERR!|error TS\d+|^FAIL\b)", re.MULTILINE)
+    r"npm ERR!|error TS\d+|^FAIL\b)", re.MULTILINE)
 
 PROMPT = """You are asked to zoom out. An engineering agent is stuck or about to sink more effort into an approach. \
 Answer from your own knowledge. Do not use tools, do not read files, do not write code. \
@@ -135,18 +135,13 @@ def _matches(patterns, text):
     return any(re.search(p, text) for p in patterns)
 
 
-def _failed(event, response):
+def _failed(event):
+    """Claude Code sends a non-zero Bash exit or a timeout as PostToolUseFailure (error="Exit code N\\n..."),
+    and a zero exit as PostToolUse with tool_response.stdout."""
     if event.get("hook_event_name") == "PostToolUseFailure":
         return True
-    if isinstance(response, dict):
-        if response.get("is_error") or response.get("interrupted"):
-            return True
-        for key in ("exit_code", "exitCode", "returncode", "code"):
-            if isinstance(response.get(key), int) and response[key] != 0:
-                return True
-        text = "\n".join(str(response.get(k, "")) for k in ("stdout", "stderr", "output", "content"))
-    else:
-        text = str(response or "")
+    resp = event.get("tool_response")
+    text = "\n".join(str(resp.get(k) or "") for k in ("stdout", "stderr")) if isinstance(resp, dict) else str(resp or "")
     return bool(FAIL_RE.search(text))
 
 
@@ -155,13 +150,18 @@ def new_state():
 
 
 def process(event, state, cfg):
-    """Update state for one PostToolUse event; return a list of new suggestion strings."""
+    """Update state for one PostToolUse or PostToolUseFailure event; return a list of new suggestion strings."""
+    resp = event.get("tool_response")
+    if event.get("is_interrupt") or (isinstance(resp, dict) and resp.get("interrupted")):
+        return []  # the user stopped the tool: they are watching, not stuck
     tool = event.get("tool_name") or ""
     tin = event.get("tool_input") or {}
     state["since_progress"] += 1
     triggers = []
     progress = False
-    if tool in cfg["edit_tools"]:
+    if tool in cfg["edit_tools"] and event.get("hook_event_name") == "PostToolUseFailure":
+        pass  # a failed edit changed nothing: activity, not an edit or progress
+    elif tool in cfg["edit_tools"]:
         path = tin.get("file_path") or tin.get("notebook_path") or "?"
         n = state["edits"].get(path, 0) + 1
         state["edits"][path] = n
@@ -170,7 +170,7 @@ def process(event, state, cfg):
             triggers.append(("edit_churn", f"the same file was edited {n} times this session ({path})"))
     elif tool == "Bash":
         cmd = " ".join((tin.get("command") or "").split())
-        failed = _failed(event, event.get("tool_response"))
+        failed = _failed(event)
         if _matches(cfg["test_command_patterns"], cmd):
             state["last_cmd"], state["streak"] = None, 0
             if failed:
@@ -221,8 +221,8 @@ def cmd_hook(_args):
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(state, fh)
         if notes:
-            sys.stdout.write(json.dumps({"hookSpecificOutput": {
-                "hookEventName": "PostToolUse", "additionalContext": "\n".join(notes)}}))
+            sys.stdout.write(json.dumps({"hookSpecificOutput": {  # must echo the event name or it is dropped
+                "hookEventName": event.get("hook_event_name") or "PostToolUse", "additionalContext": "\n".join(notes)}}))
     except Exception:  # noqa: BLE001  suggestions only: never disturb the session
         return 0
     return 0
@@ -252,7 +252,7 @@ def make_parser():
     p.add_argument("--claude-bin", help="claude executable (default $ZOOMOUT_CLAUDE or claude)")
     p.add_argument("--timeout", type=int, default=300, help="seconds before giving up (default 300)")
     p.set_defaults(fn=cmd_run)
-    p = sub.add_parser("hook", help="PostToolUse hook: read event JSON on stdin")
+    p = sub.add_parser("hook", help="PostToolUse/PostToolUseFailure hook: read event JSON on stdin")
     p.set_defaults(fn=cmd_hook)
     return ap
 
