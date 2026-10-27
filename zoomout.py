@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 PROCEDURE = """\
@@ -366,7 +367,14 @@ def hook(event, state_dir=None):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(state, fh)
-        os.replace(tmp, path)
+        for attempt in range(20):  # Windows denies a replace while another hook holds the file; retry briefly
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
