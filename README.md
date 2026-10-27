@@ -1,5 +1,7 @@
 # zoomout
 
+[![tests](https://github.com/decentralizeallengineering/zoomout/actions/workflows/tests.yml/badge.svg)](https://github.com/decentralizeallengineering/zoomout/actions/workflows/tests.yml) ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
+
 Step back and ask what the top experts in the field would do. Agents that are stuck tend to repeat the same fix. zoomout makes them restate the goal, list what failed, name the field, compare against how practitioners in that field work (as archetypal roles, never real people), and end with a verdict: CONTINUE, PIVOT to X, or SIMPLIFY to Y, with a first step. Python standard library only; the only model involved is the Claude Code you already run.
 
 Parts:
