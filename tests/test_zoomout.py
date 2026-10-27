@@ -45,6 +45,31 @@ class ZoomoutTests(unittest.TestCase):
         self.assertIn("failed 3 times", feed(cases["test_fail"])[0])
         self.assertEqual(feed([failing] * 2 + [bash("python3 -m pytest -q", "3 passed")] + [failing] * 2), [])
 
+    def test_failed_commands_arrive_as_post_tool_use_failure(self):
+        # shape captured from Claude Code 2.1: a non-zero exit fires only PostToolUseFailure, with no tool_response
+        fail = {"hook_event_name": "PostToolUseFailure", "session_id": "s2", "tool_name": "Bash",
+                "tool_input": {"command": "python -m pytest -q", "description": "Run tests"},
+                "error": "Exit code 1\n1 failed, 2 passed", "is_interrupt": False}
+        timeout = dict(fail, error="Exit code 143\nCommand timed out after 2m")
+        self.assertEqual(len(feed([fail, timeout, fail])), 1)
+        self.assertEqual(feed([dict(fail, is_interrupt=True)] * 3), [])
+        interrupted = bash("python -m pytest -q", "", interrupted=True)
+        self.assertEqual(feed([fail, fail, interrupted]), [])  # an interrupt is ignored, not a failure
+        self.assertEqual(feed([fail, fail, interrupted, fail]), feed([fail] * 3))  # and not a pass
+        failed_edit = {"hook_event_name": "PostToolUseFailure", "tool_name": "Edit", "error": "String to replace not found",
+                       "tool_input": {"file_path": "/work/new.py"}}
+        self.assertEqual(len(feed([edit("/work/a.py")] + [failed_edit] * 30)), 1)  # activity, not progress: stall fires
+        with tempfile.TemporaryDirectory() as state_dir:
+            env = dict(os.environ, ZOOMOUT_STATE_DIR=state_dir)
+            env.pop("ZOOMOUT_OFF", None)
+            procs = [subprocess.run([sys.executable, CLI, "hook"], input=json.dumps(fail), env=env, capture_output=True,
+                                    text=True, timeout=20, check=False) for _ in range(3)]
+        self.assertEqual([(p.returncode, p.stdout) for p in procs[:2]], [(0, ""), (0, "")])
+        self.assertEqual(procs[2].returncode, 0)
+        out = json.loads(procs[2].stdout)["hookSpecificOutput"]
+        self.assertEqual(out["hookEventName"], "PostToolUseFailure")  # Claude Code rejects a mismatched name
+        self.assertIn("failed 3 times", out["additionalContext"])
+
     def test_fires_once_per_kind(self):
         notes = feed([edit("/work/a.py")] * 12)
         self.assertEqual(len(notes), 1)

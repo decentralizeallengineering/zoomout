@@ -9,7 +9,7 @@ Parts:
 - `zoomout.py`: the CLI (`prompt`, `run`, `hook`).
 - `.claude/commands/zoomout.md`: the `/zoomout` slash command, for use inside a session.
 - `SKILL.md`: the same procedure as a skill.
-- A PostToolUse hook (`zoomout hook`) that only suggests `/zoomout`, never blocks. It fires once per trigger kind per session when: the same test fails 3 times; the same file is edited 5 times; a non-test command is retried 3 times in a row; or more than 25 tool calls pass since the last progress signal (a passing test, a successful git commit, or the first edit of a new file).
+- A PostToolUse/PostToolUseFailure hook (`zoomout hook`) that only suggests `/zoomout`, never blocks. It fires once per trigger kind per session when: the same test fails 3 times; the same file is edited 5 times; a non-test command is retried 3 times in a row; or more than 25 tool calls pass since the last progress signal (a passing test, a successful git commit, or the first edit of a new file).
 
 ## Install
 
@@ -20,7 +20,10 @@ Parts:
 
 Add to `~/.claude/settings.json`:
 
-    {"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.local/bin/zoomout hook"}]}]}}
+    {"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.local/bin/zoomout hook"}]}],
+               "PostToolUseFailure": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.local/bin/zoomout hook"}]}]}}
+
+Both events are needed: Claude Code reports a failing command (non-zero exit or timeout) only as `PostToolUseFailure`.
 
 ## Configure
 
