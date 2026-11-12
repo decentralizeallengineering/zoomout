@@ -1,0 +1,9 @@
+{
+  "name": "zoomout",
+  "version": "0.2.0",
+  "description": "Step back when an agent is stuck: compare with how experts work, then CONTINUE, PIVOT or SIMPLIFY.",
+  "author": {"name": "decentralizeallengineering"},
+  "homepage": "https://github.com/decentralizeallengineering/zoomout",
+  "license": "Apache-2.0",
+  "skills": ["./"]
+}

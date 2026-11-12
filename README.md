@@ -2,13 +2,32 @@
 
 [![tests](https://github.com/decentralizeallengineering/zoomout/actions/workflows/tests.yml/badge.svg)](https://github.com/decentralizeallengineering/zoomout/actions/workflows/tests.yml) ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-Step back and ask what the top experts in the field would do. Agents that are stuck tend to repeat the same fix. zoomout makes them restate the goal, list what failed, quote the key fact, name the field, compare against how practitioners in that field work (as archetypal roles, never real people), and end with a verdict: CONTINUE, PIVOT to X, or SIMPLIFY to Y, with a first step. Python standard library only; the only model involved is the Claude Code you already run.
+zoomout makes a stuck coding agent step back, compare its approach with how experts in the field work, and end with CONTINUE, PIVOT or SIMPLIFY.
 
 ## Install
 
     git clone --depth 1 https://github.com/decentralizeallengineering/zoomout && python3 zoomout/zoomout.py install
 
-This copies the `/zoomout` command, the skill and `zoomout.py` into `${CLAUDE_CONFIG_DIR:-~/.claude}` (`--project DIR` puts them in `DIR/.claude` instead); nothing is added to your PATH. On Windows use `py` for `python3`. Optional hook that suggests `/zoomout` when the agent looks stuck:
+As a Claude Code plugin:
+
+    claude plugin marketplace add decentralizeallengineering/decentralizeallengineering && claude plugin install zoomout@decentralizeallengineering
+
+## Example
+
+The hook suggests `/zoomout` when the same test fails 3 times in a session:
+
+```console
+$ for i in 1 2 3; do echo '{"session_id":"demo","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"pytest tests/test_parser.py"},"error":"Exit code 1"}' | python3 zoomout/zoomout.py hook; done
+{"hookSpecificOutput": {"hookEventName": "PostToolUseFailure", "additionalContext": "consider /zoomout: the same test failed 3 times (pytest tests/test_parser.py)"}}
+```
+
+## How it works
+
+Step back and ask what the top experts in the field would do. Agents that are stuck tend to repeat the same fix. zoomout makes them restate the goal, list what failed, quote the key fact, name the field, compare against how practitioners in that field work (as archetypal roles, never real people), and end with a verdict: CONTINUE, PIVOT to X, or SIMPLIFY to Y, with a first step. Python standard library only; the only model involved is the Claude Code you already run.
+
+## Setup
+
+The clone install copies the `/zoomout` command, the skill and `zoomout.py` into `${CLAUDE_CONFIG_DIR:-~/.claude}` (`--project DIR` puts them in `DIR/.claude` instead); nothing is added to your PATH. On Windows use `py` for `python3`. Optional hook that suggests `/zoomout` when the agent looks stuck:
 
     python3 zoomout/zoomout.py init --print
 
