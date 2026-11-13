@@ -61,3 +61,9 @@ The hook fires when: the same test fails 3 times; the same file is edited 5 time
 ## Test
 
     pip install pytest jsonschema && python -m pytest -q
+
+## Related
+
+- [codeindex](https://github.com/decentralizeallengineering/codeindex): where a symbol is defined, who calls it, which tests cover it; same plugin marketplace
+- [donegate](https://github.com/decentralizeallengineering/donegate): Stop hook: no "done" without a test run after the last edit
+- [all tools](https://github.com/decentralizeallengineering): the index of this account
